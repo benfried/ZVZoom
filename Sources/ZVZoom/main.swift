@@ -91,8 +91,8 @@ func runCLI(_ args: [String]) async -> Int32 {
         case "set":
             guard args.count >= 2, let mag = Double(args[1]) else { print(usage); return 2 }
             let target = Int((mag * 1000).rounded())
-            let final = try await cam.moveZoom(to: target, metric: .scale, tolerance: 50,
-                                               msPerUnit: Settings.msPerUnit / 25) { st in
+            let final = try await cam.moveZoom(to: target, metric: .scale, tolerance: 60,
+                                               msPerUnit: Settings.msPerUnit / 17, minStep: 120) { st in
                 print("  now \(st)")
             }
             print(String(format: "done: x%.2f (target x%.2f)", final.magnification, mag))

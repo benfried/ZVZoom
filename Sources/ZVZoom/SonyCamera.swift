@@ -364,7 +364,7 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     /// for ~500 ms after the lens stops, so this first waits `minWait`, then requires two
     /// identical consecutive reads (scale and bar position).
     /// Measured on the ZV-1: the report updates roughly 0.6 to 1.2 s after the stop command.
-    static var settleMinWait: TimeInterval = 1.3
+    static var settleMinWait: TimeInterval = 1.1
     static var settleEqualReads = 3
 
     @discardableResult
@@ -407,12 +407,18 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
         }
     }
 
-    /// Drive the zoom to `target` measured in `metric`, with pulses of ZoomOperation sized from
-    /// an adaptive estimate of ms per unit, and the report left to settle between pulses.
+    /// Drive the zoom to `target` measured in `metric`.
+    ///
+    /// Lens model measured on the ZV-1 (bar positions): any pulse of `minPulseMs` or longer moves
+    /// about `minStep` positions; beyond that the travel is roughly linear at `msPerUnit`. The
+    /// report lags by about a second, so each pulse is followed by a settle wait before the next
+    /// decision. Within `tolerance` of the target the loop stops; a diff smaller than `minStep`
+    /// gets one minimum pulse, which lands within a few positions.
     @discardableResult
-    func moveZoom(to target: Int, metric: ZoomMetric = .bar, tolerance: Int = 1,
-                  msPerUnit initialRate: Double = 15, minPulseMs: Double = 40, maxPulseMs: Double = 2500,
-                  maxIterations: Int = 12, progress: ((ZoomState) -> Void)? = nil) async throws -> ZoomState {
+    func moveZoom(to target: Int, metric: ZoomMetric = .bar, tolerance: Int = 3,
+                  msPerUnit initialRate: Double = 7.5, minStep: Int = 7,
+                  minPulseMs: Double = 40, maxPulseMs: Double = 3000,
+                  maxIterations: Int = 8, progress: ((ZoomState) -> Void)? = nil) async throws -> ZoomState {
         var rate = initialRate
         var stalls = 0
         var st = try await waitUntilZoomReady()
@@ -425,25 +431,29 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
                 return st
             }
             let dir: ZoomDirection = diff > 0 ? .tele : .wide
-            // Undershoot slightly on purpose; hunting past the target costs a full extra cycle.
-            let ms = min(max(Double(abs(diff)) * rate * 0.85, minPulseMs), maxPulseMs)
-            Log.info("iteration \(i): \(metric)=\(cur) target=\(target) -> \(dir) for \(Int(ms)) ms (rate \(String(format: "%.1f", rate)) ms/unit)")
+            // Pulse length: the minimum pulse covers the first minStep positions; the rest is
+            // linear. Undershoot a little on purpose, since overshooting costs a full cycle.
+            let beyond = max(0, abs(diff) - minStep)
+            let ms = min(minPulseMs + Double(beyond) * rate * 0.85, maxPulseMs)
+            Log.info("iteration \(i): \(metric)=\(cur) target=\(target) diff=\(diff) -> \(dir) for \(Int(ms)) ms (rate \(String(format: "%.1f", rate)) ms/unit)")
             try await zoom(dir)
             try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
             try await zoom(.stop)
             let after = try await waitUntilZoomSettled(progress: progress)
             let moved = abs(metric.value(after) - cur)
-            if moved > 0 {
-                let observed = ms / Double(moved)
-                rate = 0.5 * rate + 0.5 * min(max(observed, 2), 200)
+            if moved > minStep && beyond > 0 {
+                // Refine the linear rate from what the part beyond the minimum step actually did.
+                let observed = (ms - minPulseMs) / Double(moved - minStep)
+                rate = 0.6 * rate + 0.4 * min(max(observed, 2), 60)
                 stalls = 0
-            } else {
+            } else if moved == 0 {
                 stalls += 1
                 if stalls >= 3 {
                     Log.info("zoom not moving after 3 pulses, giving up at \(after)")
                     return after
                 }
-                rate *= 1.5 // pulse was too short to move the lens; try longer
+            } else {
+                stalls = 0
             }
             st = after
         }

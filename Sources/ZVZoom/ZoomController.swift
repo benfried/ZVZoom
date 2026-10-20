@@ -30,13 +30,13 @@ enum Settings {
 
     /// Accepted error in bar positions when restoring.
     static var tolerance: Int {
-        get { d.object(forKey: "tolerance") == nil ? 1 : d.integer(forKey: "tolerance") }
+        get { d.object(forKey: "tolerance") == nil ? 3 : d.integer(forKey: "tolerance") }
         set { d.set(newValue, forKey: "tolerance") }
     }
 
     /// Initial estimate of lens travel time per bar position (ms). Refined during each restore.
     static var msPerUnit: Double {
-        get { d.object(forKey: "msPerUnit") == nil ? 15 : d.double(forKey: "msPerUnit") }
+        get { d.object(forKey: "msPerUnit") == nil ? 7.5 : d.double(forKey: "msPerUnit") }
         set { d.set(newValue, forKey: "msPerUnit") }
     }
 
@@ -181,8 +181,8 @@ final class ZoomController: ObservableObject {
                     self?.currentZoom = st
                 }
             } else {
-                final = try await cam.moveZoom(to: Int(presetScale!), metric: .scale, tolerance: 50,
-                                               msPerUnit: Settings.msPerUnit / 25) { [weak self] st in
+                final = try await cam.moveZoom(to: Int(presetScale!), metric: .scale, tolerance: 60,
+                                               msPerUnit: Settings.msPerUnit / 17, minStep: 120) { [weak self] st in
                     self?.currentZoom = st
                 }
             }
