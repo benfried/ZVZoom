@@ -1,15 +1,12 @@
 # ZVZoom
 
 A macOS menubar app that remembers the zoom position of a Sony ZV-1 and restores it
-when the camera powers on. It talks to the camera over USB in PC Remote mode, through
+when the camera powers on. It talks to the camera over USB in PC Remote mode through
 Apple's ImageCaptureCore framework. Because ImageCaptureCore is the front end for
 `ptpcamerad`, the app goes through the daemon instead of fighting it for the USB
 interface. No SIP changes, no kill loops, no libgphoto2.
 
-Status: untested on real hardware. The protocol details come from libgphoto2's Sony
-driver and a device dump from a real ZV-1, so the opcodes and property codes are right.
-What has not been verified is how `ptpcamerad` handles Sony's vendor commands with a
-data phase. The diagnostic subcommands exist so that is the first thing you find out.
+Tested on a ZV-1 running Sony PC Remote protocol 3.00 (current firmware) on macOS 26.
 
 ## Camera setup
 
@@ -17,84 +14,16 @@ data phase. The diagnostic subcommands exist so that is the first thing you find
 2. Connect USB to the Mac. HDMI stays connected to your capture device as before.
 3. Power the camera on. In PC Remote mode it enumerates as USB `054c:0c44`.
 
-## Build
+## Build and run
 
 Requires Xcode command line tools (Swift 5.9+, macOS 13+).
 
 ```
 cd ZVZoom
 swift build
+.build/debug/ZVZoom            # menubar app
+.build/debug/ZVZoom -h         # CLI diagnostics
 ```
-
-The binary is `.build/debug/ZVZoom`. Run it with no arguments for the menubar app, or with a
-subcommand for diagnostics.
-
-## First run: diagnostics, in this order
-
-Each step uses the previous one's result. Stop at the first one that fails and send me the
-output plus `~/Library/Logs/ZVZoom.log`.
-
-```
-# 1. Does ptpcamerad surface the camera, and does the Sony handshake complete?
-#    Only data-in commands are used here.
-.build/debug/ZVZoom -v dump
-```
-
-Look for `ZoomScale` (0xd25c), `ZoomEnableStatus` (0xd25b) and `ZoomOperation` (0xd2dd) in
-the property list. On the ZV-1 dump in libgphoto2, ZoomScale is `1000` at full wide (1.0x);
-the lens goes to about `2900` at full optical tele.
-
-```
-# 2. Does a control command with a data phase work? Press tele for 300 ms.
-.build/debug/ZVZoom -v op tele 300
-.build/debug/ZVZoom -v op wide 300
-```
-
-The `after` line should show a different ZoomScale and the lens should move. If the
-command stalls for a long time or returns an error, ImageCaptureCore is not passing
-Sony's data phase through cleanly; see Troubleshooting.
-
-```
-# 3. Closed-loop move to a magnification.
-.build/debug/ZVZoom -v set 1.8
-```
-
-Watch the printed `now` lines to see how precisely it lands. Two settings tune this,
-both stored in UserDefaults:
-
-```
-defaults write local.zvzoom pulseMs -int 80        # length of a fine-tuning pulse
-defaults write local.zvzoom tolerance -int 50      # accepted ZoomScale error
-defaults write local.zvzoom connectDelay -float 3  # wait after the camera appears
-```
-
-(When run as a bare binary rather than the .app, the defaults domain is the executable
-name: use `defaults write ZVZoom ...` instead.)
-
-```
-# 4. Optional experiment: absolute zoom write.
-.build/debug/ZVZoom -v abs 23462912
-```
-
-libgphoto2 maps property 0xD214 to an absolute "zoom" value (the ZV-1 dump shows
-23462912 at wide). Whether the ZV-1 accepts a write to it is unknown. If it does, the
-restore could be one command instead of a feedback loop; tell me and I will switch the
-app over.
-
-## The menubar app
-
-```
-.build/debug/ZVZoom
-```
-
-Menu items:
-
-- **Save Current Zoom** reads ZoomScale and stores it.
-- **Restore Saved Zoom** drives the lens to the stored value.
-- **Restore Automatically on Connect** (default on) runs a restore every time the camera
-  appears, after a 3 second settle and once the camera reports zoom as enabled.
-- **Zoom In / Zoom Out (nudge)** sends one pulse.
-- **Open Log** opens `~/Library/Logs/ZVZoom.log`.
 
 To run it at login, build a bundle and add it as a Login Item:
 
@@ -103,66 +32,118 @@ To run it at login, build a bundle and add it as a Login Item:
 open ZVZoom.app
 ```
 
+Menu items:
+
+- **Save Current Zoom** reads the zoom position and stores it.
+- **Restore Saved Zoom** drives the lens to the stored position.
+- **Restore Automatically on Connect** (default on) runs a restore every time the camera
+  appears, after a 3 second settle and once the camera reports a valid zoom position.
+- **Zoom In / Zoom Out (nudge)** sends one short pulse.
+- **Open Log** opens `~/Library/Logs/ZVZoom.log`.
+
+## CLI diagnostics
+
+```
+ZVZoom [-v] dump            handshake, then print every property the camera reports
+ZVZoom [-v] get             print the current zoom state
+ZVZoom [-v] pos <n>         drive the zoom to a bar position (0 = full wide)
+ZVZoom [-v] set <mag>       drive the zoom to a magnification, e.g. 1.8 (coarser)
+ZVZoom [-v] roundtrip       save the current position, zoom away, restore, report the error
+ZVZoom [-v] calib [ms ...]  measure positions moved and report lag per pulse length
+ZVZoom [-v] op <tele|wide|stop> [ms]
+ZVZoom [-v] raw <opcode> [p1 p2 ...]
+ZVZoom [-v] watch
+```
+
+`run-diag.command` is a double-clickable wrapper: it builds, then runs each line of
+`diag-args.txt` as a ZVZoom invocation and saves the output to `diag-dump.txt`.
+
 ## How it works
 
 Sony's PC Remote protocol is plain PTP with vendor opcodes. After `ptpcamerad` opens the
-session, the app runs the same handshake libgphoto2 uses:
+session, the app runs the handshake libgphoto2 uses:
 
 ```
 0x9201 SDIO_Connect(1)
 0x9201 SDIO_Connect(2)
 0x9202 SDIO_GetExtDeviceInfo(0x12c, 1)   -> protocol version + list of vendor codes
 0x9201 SDIO_Connect(3)
+0x9205 SetExtDevicePropValue(PriorityMode=1)
 ```
 
 Then:
 
-- `0x9209 GetAllExtDevicePropInfo` returns a blob with every property descriptor. The app
-  parses it (PTP.swift, `SonyDPDParser`) and reads ZoomScale (0xD25C, magnification x1000),
-  ZoomEnableStatus (0xD25B), ZoomBarInformation (0xD25D) and ZoomSetting (0xD25F).
-- `0x9207 ControlDevice(0xD2DD)` with a 1-byte INT8 data phase moves the lens: -1 wide,
-  +1 tele, 0 stop. The lens keeps moving until it gets the 0.
+- `0x9209 GetAllExtDevicePropInfo` returns a blob of 88 property descriptors in the
+  protocol 3.00 format (each enum carries a second "settable now" list). The parser is in
+  `PTP.swift`.
+- `0x9207 ControlDevice(0xD2DD ZoomOperation)` with a 1-byte INT8 payload moves the lens:
+  -1 wide, +1 tele, 0 stop.
+- Position feedback comes from `0xD25D ZoomBarInformation`: its low byte is the zoom bar
+  position, 0 at full wide, about 100 at full optical tele (2.7x). `0xD25C ZoomScale`
+  (magnification x1000) is also read but is quantized to 0.1x, so the bar position is
+  what gets saved and restored.
 
-Restore is a feedback loop (`SonyCamera.moveZoom`): drive continuously while far from the
-target, then short pulses, reading ZoomScale between steps, until within tolerance.
+Every PTP exchange goes through `ICCameraDevice.requestSendPTPCommand(_:outData:)`. The
+command block is the standard USB PTP container in little-endian; `ptpcamerad` fills in
+the transaction id. The two buffers it returns are not in a documented order, so the
+response container is identified by its header.
 
-Every PTP exchange is sent with `ICCameraDevice.requestSendPTPCommand(_:outData:)`. The
-command block is the standard USB PTP container (length, type 1, opcode, transaction id,
-params) in little-endian; `ptpcamerad` fills in the transaction id.
+## What the ZV-1 actually does (measured)
+
+- The zoom report updates about 0.9 to 1.1 s after a `ZoomOperation` command, and keeps
+  updating until about 1.5 s for long pulses. The camera sends PTP event 0xC203 when it
+  updates. Reading sooner returns the old value.
+- Any pulse of 40 ms or more moves at least 7 bar positions. Beyond that the travel is
+  roughly linear at about 7.5 ms per position, with some jitter.
+- Right after the handshake, `ZoomScale` can read 0 for a short time; the app waits for a
+  nonzero value.
+- `0xD214` (which libgphoto2 maps to an absolute zoom) reads 0xFFFFFFFF and is read-only
+  on this firmware. There is no absolute zoom command on the ZV-1.
+- If a PC Remote session is left half-open (a crashed client), the next
+  `SDIO_Connect(1)` fails with Sony response 0xA101 (AuthenticationFailed). Power-cycle
+  the camera or replug USB.
+
+The restore loop (`SonyCamera.moveZoom`) sizes each pulse from that model, waits for the
+report to settle, and repeats until within tolerance (default 3 positions, about 0.03x).
+Typical restore from power-on: two pulses, 4 to 6 seconds.
+
+Tunables, stored in UserDefaults (`defaults write ZVZoom <key> ...` for the bare binary,
+`defaults write local.zvzoom <key> ...` for the .app):
+
+```
+tolerance     -int 3       accepted error in bar positions
+msPerUnit     -float 7.5   initial travel estimate, refined during each restore
+nudgeMs       -int 80      length of a manual nudge pulse
+connectDelay  -float 3     seconds to wait after the camera appears
+```
 
 ## Troubleshooting
 
 **No camera appears.** Check Image Capture.app: if the ZV-1 is not listed there either,
-the Mac is not seeing it as a PTP device. Confirm USB Connection is PC Remote (not Mass
-Storage or MTP) and the camera is on. The product id in the log should be `0c44`.
+the Mac is not seeing it as a PTP device. Confirm USB Connection is PC Remote and the
+camera is on. The product id in the log should be `0c44`.
 
-**Handshake fails or the camera stalls.** The Sony handshake must run before any
-`0x9205`/`0x9207` command; the app does this. If `dump` works but `op` stalls, the
-issue is the data phase. Things to try, in order: a longer `connectDelay`; power-cycle the
-camera between runs (a half-finished Sony transaction leaves the camera mute until
-replug); and tell me the exact response code from the log. There is an Apple developer
-forum report of exactly this stall with a Sony body, so this is the known risk of the
-ImageCaptureCore route. The fallback is Option 1 from our chat: a `gphoto2 --shell`
-session opened under a `killall ptpcamerad` loop, which the app could drive instead.
+**AuthenticationFailed on connect.** Power the camera off and on, or unplug and replug.
 
-**Zoom overshoots or hunts.** Lower `pulseMs` (try 50) and keep `tolerance` at 50 or
-100. The ZV-1 reports ZoomScale in steps of 100 at the wide end, so a tolerance below 50
-is not meaningful.
+**Zoom lands a few positions off.** Tolerance 3 is about 0.03x. Lower it to 1 if you
+want, at the cost of an extra pulse or two per restore.
 
-**Clear Image Zoom / Digital Zoom.** ZoomScale counts the whole range, so a saved value of
-4000 restores into the digital range if ZoomSetting allows it. If you want optical only,
-set Zoom Setting to Optical zoom only on the camera and the app cannot exceed 2.9x.
+**Clear Image Zoom / Digital Zoom.** With Zoom Setting on the camera set to optical only
+(`ZoomSetting` = 1), the bar runs 0 to about 100 over the optical range. Other settings
+extend the bar into the digital range; the app does not care, it restores whatever
+position was saved.
 
 ## Files
 
 - `Sources/ZVZoom/PTP.swift` – PTP container encode/decode, data types, Sony property
-  descriptor parser, opcode and property constants.
+  descriptor parser (protocol 2 and 3), opcode and property constants.
 - `Sources/ZVZoom/SonyCamera.swift` – ImageCaptureCore device browser, camera session,
-  handshake, property reads, zoom control, feedback loop.
+  handshake, property reads, zoom control, settle logic, restore loop.
 - `Sources/ZVZoom/ZoomController.swift` – settings, save/restore, auto-restore on connect.
 - `Sources/ZVZoom/App.swift` – SwiftUI `MenuBarExtra` UI.
 - `Sources/ZVZoom/main.swift` – entry point and the CLI diagnostics.
 - `make-app.sh` – wraps the release binary in a `.app` for Login Items.
+- `run-diag.command` – double-clickable diagnostic runner.
 
 References: libgphoto2 `camlibs/ptp2/{ptp.h,ptp.c,ptp-pack.c,library.c}` and
 `camlibs/ptp2/cameras/sony-zv1.txt`.

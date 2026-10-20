@@ -1,5 +1,6 @@
+*.xcodeproj
+.DS_Store
 .build/
 .swiftpm/
-*.xcodeproj
 ZVZoom.app/
-.DS_Store
+diag-*.txt
