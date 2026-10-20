@@ -66,9 +66,14 @@ func runCLI(_ args: [String]) async -> Int32 {
             let codes = cam.supportedCodes.map { String(format: "0x%04x", $0) }
             print("vendor codes (\(codes.count)): " + codes.joined(separator: " "))
             let props = try await cam.refreshProps()
-            print("properties (\(props.count)):")
+            let declared = cam.lastPropBlob.count >= 4 ? cam.lastPropBlob.readLE(UInt32.self, at: 0) : 0
+            print("properties (parsed \(props.count), camera declared \(declared)):")
             for p in props.values.sorted(by: { $0.code < $1.code }) {
                 print("  \(p)")
+            }
+            if Log.verbose {
+                print("raw property blob (\(cam.lastPropBlob.count) bytes):")
+                print(cam.lastPropBlob.hexString)
             }
             let z = try await cam.zoomState()
             print("zoom: \(z)")

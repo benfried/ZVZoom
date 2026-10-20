@@ -107,6 +107,7 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     private(set) var protocolVersion: Int = 0
     private(set) var supportedCodes: [UInt16] = []
     private(set) var props: [UInt16: SonyPropDesc] = [:]
+    private(set) var lastPropBlob = Data()
     private var openContinuation: CheckedContinuation<Void, Error>?
 
     init(device: ICCameraDevice) {
@@ -273,6 +274,7 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     @discardableResult
     func refreshProps() async throws -> [UInt16: SonyPropDesc] {
         let (_, blob) = try await send(SonyOp.getAllExtDevicePropInfo)
+        lastPropBlob = blob
         let list = SonyDPDParser.parseAll(blob)
         var dict: [UInt16: SonyPropDesc] = [:]
         for p in list { dict[p.code] = p }

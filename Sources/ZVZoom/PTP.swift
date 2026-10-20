@@ -265,7 +265,8 @@ struct SonyPropDesc: CustomStringConvertible {
     var rangeMin: PTPValue?
     var rangeMax: PTPValue?
     var rangeStep: PTPValue?
-    var enumValues: [PTPValue] = []
+    var enumValues: [PTPValue] = []   // settable now (protocol 3) or the full list (protocol 2)
+    var enumAll: [PTPValue] = []      // protocol 3 only: the full list when a settable subset was given
 
     var description: String {
         let hex = String(format: "0x%04x", code)
@@ -275,6 +276,9 @@ struct SonyPropDesc: CustomStringConvertible {
             s += " range[\(a)..\(b) step \(c)]"
         } else if formFlag == 2 {
             s += " enum[" + enumValues.map { "\($0)" }.joined(separator: ",") + "]"
+            if !enumAll.isEmpty {
+                s += " all[" + enumAll.map { "\($0)" }.joined(separator: ",") + "]"
+            }
         }
         return s
     }
@@ -329,6 +333,24 @@ enum SonyDPDParser {
             }
         default:
             break
+        }
+        // Protocol 3.00 (2020+ bodies) may append a second list: the values that are
+        // settable right now. Its 16-bit count is < 0x200, whereas the next property
+        // code is 0x5xxx or 0xDxxx, which is how libgphoto2 tells them apart.
+        if offset + 2 <= d.count {
+            let peek = d.readLE(UInt16.self, at: offset)
+            if peek < 0x200 {
+                if form == 2 {
+                    offset += 2
+                    desc.enumAll = desc.enumValues
+                    desc.enumValues = []
+                    for _ in 0..<Int(peek) {
+                        guard let v = ptpDecode(d, &offset, type: type) else { break }
+                        desc.enumValues.append(v)
+                    }
+                }
+                // For non-enum forms libgphoto2 leaves the bytes alone, so we do too.
+            }
         }
         return desc
     }
