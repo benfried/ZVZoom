@@ -377,7 +377,7 @@ extension Data {
     func readLE<T: FixedWidthInteger>(_: T.Type, at offset: Int) -> T {
         let n = MemoryLayout<T>.size
         var v: T = 0
-        Swift.withUnsafeMutableBytes(of: &v) { dst in
+        _ = Swift.withUnsafeMutableBytes(of: &v) { dst in
             self.copyBytes(to: dst, from: (startIndex + offset)..<(startIndex + offset + n))
         }
         return T(littleEndian: v)

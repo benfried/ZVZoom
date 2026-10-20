@@ -47,7 +47,7 @@ final class CameraWatcher: NSObject, ICDeviceBrowserDelegate, ObservableObject {
         super.init()
         browser.delegate = self
         browser.browsedDeviceTypeMask = ICDeviceTypeMask(rawValue:
-            ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue)
+            ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue)!
     }
 
     func start() {
