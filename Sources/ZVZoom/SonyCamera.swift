@@ -191,7 +191,7 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
               timeout: TimeInterval = 8) async throws -> (PTPResponse, Data) {
         let cmd = PTPCommand(opcode: opcode, params: params).encode()
         Log.debug("-> op 0x\(String(opcode, radix: 16)) params=[\(params.map { "0x" + String($0, radix: 16) }.joined(separator: ","))] out=\(data?.hexString ?? "-")")
-        let (respData, inData) = try await withThrowingTaskGroup(of: (Data, Data).self) { group in
+        let (bufA, bufB) = try await withThrowingTaskGroup(of: (Data, Data).self) { group in
             group.addTask { try await self.device.requestSendPTPCommand(cmd, outData: data) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -201,8 +201,17 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
             group.cancelAll()
             return first
         }
-        guard let resp = PTPResponse(respData) else {
-            throw PTPError(opcode: opcode, message: "short response (\(respData.count) bytes): \(respData.hexString)")
+        Log.debug("<- raw bufA(\(bufA.count)): \(bufA.prefix(48).hexString) bufB(\(bufB.count)): \(bufB.prefix(48).hexString)")
+        // ImageCaptureCore returns (response container, data phase) but the documentation
+        // does not say which is which, so identify the container by its header.
+        let resp: PTPResponse
+        let inData: Data
+        if let r = PTPResponse(bufA), r.looksLikeContainer(size: bufA.count) {
+            resp = r; inData = bufB
+        } else if let r = PTPResponse(bufB), r.looksLikeContainer(size: bufB.count) {
+            resp = r; inData = bufA
+        } else {
+            throw PTPError(opcode: opcode, message: "no response container found. bufA(\(bufA.count)): \(bufA.hexString) bufB(\(bufB.count)): \(bufB.hexString)")
         }
         Log.debug("<- resp \(resp.describeCode) params=[\(resp.params.map { "0x" + String($0, radix: 16) }.joined(separator: ","))] in=\(inData.count) bytes")
         guard resp.isOK else {

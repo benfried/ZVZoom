@@ -77,6 +77,14 @@ struct PTPResponse {
 
     var isOK: Bool { code == PTPResponseCode.ok.rawValue }
 
+    /// True if the header is consistent with a PTP response block of this buffer size.
+    func looksLikeContainer(size: Int) -> Bool {
+        type == PTPContainerType.response.rawValue
+            && (code & 0xF000) == 0x2000
+            && length >= 12 && length <= 32
+            && Int(length) <= size
+    }
+
     var describeCode: String {
         if let c = PTPResponseCode(rawValue: code) { return "\(c) (0x\(String(code, radix: 16)))" }
         return "0x" + String(code, radix: 16)
