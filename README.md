@@ -115,6 +115,7 @@ tolerance     -int 3       accepted error in bar positions
 msPerUnit     -float 7.5   initial travel estimate, refined during each restore
 nudgeMs       -int 80      length of a manual nudge pulse
 connectDelay  -float 3     seconds to wait after the camera appears
+zoomWarmup    -float 2     seconds to wait after power-on before the first restore pulse
 ```
 
 ## Troubleshooting

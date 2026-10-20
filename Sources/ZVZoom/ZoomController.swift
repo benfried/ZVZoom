@@ -40,6 +40,12 @@ enum Settings {
         set { d.set(newValue, forKey: "msPerUnit") }
     }
 
+    /// Seconds to wait after the zoom reports ready before the first restore pulse.
+    static var zoomWarmup: Double {
+        get { d.object(forKey: "zoomWarmup") == nil ? 2.0 : d.double(forKey: "zoomWarmup") }
+        set { d.set(newValue, forKey: "zoomWarmup") }
+    }
+
     /// Seconds to wait after the camera appears before talking to it (ZV-1 needs ~3 s).
     static var connectDelay: Double {
         get { d.object(forKey: "connectDelay") == nil ? 3.0 : d.double(forKey: "connectDelay") }
@@ -116,6 +122,9 @@ final class ZoomController: ObservableObject {
                 status = .ready
                 Log.info("camera ready, zoom \(currentZoom!)")
                 if restoreOnConnect, hasPreset {
+                    // Right after power-on the ZV-1 reports zoom as enabled a moment before it
+                    // acts on ZoomOperation; the first pulse was lost without this pause.
+                    try await Task.sleep(nanoseconds: UInt64(Settings.zoomWarmup * 1_000_000_000))
                     await restore()
                 }
             } catch {
