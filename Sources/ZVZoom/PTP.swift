@@ -78,17 +78,30 @@ struct PTPResponse {
     var isOK: Bool { code == PTPResponseCode.ok.rawValue }
 
     /// True if the header is consistent with a PTP response block of this buffer size.
+    /// Standard response codes are 0x2xxx; vendor codes (Sony included) are 0xAxxx.
     func looksLikeContainer(size: Int) -> Bool {
         type == PTPContainerType.response.rawValue
-            && (code & 0xF000) == 0x2000
+            && ((code & 0xF000) == 0x2000 || (code & 0xF000) == 0xA000)
             && length >= 12 && length <= 32
             && Int(length) <= size
     }
 
     var describeCode: String {
-        if let c = PTPResponseCode(rawValue: code) { return "\(c) (0x\(String(code, radix: 16)))" }
-        return "0x" + String(code, radix: 16)
+        let hex = "0x" + String(code, radix: 16)
+        if let c = PTPResponseCode(rawValue: code) { return "\(c) (\(hex))" }
+        if let s = Self.sonyCodes[code] { return "Sony_\(s) (\(hex))" }
+        return hex
     }
+
+    /// Sony vendor response codes, from libgphoto2 ptp.h.
+    static let sonyCodes: [UInt16: String] = [
+        0xA101: "AuthenticationFailed",
+        0xA102: "PasswordLengthOverMax",
+        0xA103: "PasswordIncludesInvalidChar",
+        0xA104: "FeatureVersionInvalidValue",
+        0xA105: "TemporaryStorageFull",
+        0xA106: "CameraStatusError",
+    ]
 }
 
 struct PTPError: Error, CustomStringConvertible {

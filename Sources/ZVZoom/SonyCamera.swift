@@ -225,7 +225,12 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     func handshake() async throws {
         if handshakeDone { return }
         try await open()
-        try await send(SonyOp.sdioConnect, [1, 0, 0])
+        do {
+            try await send(SonyOp.sdioConnect, [1, 0, 0])
+        } catch let e as PTPError where e.message.contains("AuthenticationFailed") {
+            throw PTPError(opcode: SonyOp.sdioConnect, message:
+                "camera refused SDIO_Connect phase 1 (Sony_AuthenticationFailed). This usually means a previous PC Remote session was left half-open. Power the camera off and on (or unplug and replug USB), then retry.")
+        }
         try await send(SonyOp.sdioConnect, [2, 0, 0])
 
         // Ask for protocol 3.00 (0x12c); older bodies answer with the version they support.
