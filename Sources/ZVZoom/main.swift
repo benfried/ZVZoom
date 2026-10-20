@@ -53,9 +53,12 @@ func waitForCamera(_ watcher: CameraWatcher, timeout: TimeInterval = 30) async t
 func runCLI(_ args: [String]) async -> Int32 {
     let watcher = CameraWatcher()
     watcher.start()
+    var camRef: SonyCamera?
+    defer { camRef?.close() }
     do {
         print("waiting for camera…")
         let cam = try await waitForCamera(watcher)
+        camRef = cam
         print("found \(cam.device.name ?? "camera"), waiting \(Settings.connectDelay)s before handshake")
         try await Task.sleep(nanoseconds: UInt64(Settings.connectDelay * 1_000_000_000))
         try await cam.handshake()
@@ -142,7 +145,6 @@ func runCLI(_ args: [String]) async -> Int32 {
             print(usage)
             return 2
         }
-        cam.close()
         return 0
     } catch {
         print("error: \(error)")
