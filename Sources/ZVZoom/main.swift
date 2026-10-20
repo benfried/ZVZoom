@@ -15,6 +15,7 @@ usage:
   ZVZoom [-v] set <mag>       drive the zoom to a magnification, e.g. 1.8 (coarse: ZoomScale)
   ZVZoom [-v] pos <n>         drive the zoom to a bar position (fine: ZoomBarInformation)
   ZVZoom [-v] roundtrip       save the current position, zoom away, restore, report the error
+  ZVZoom [-v] calib [ms ...]  measure positions moved per pulse length, tele then wide
   ZVZoom [-v] op <tele|wide|stop> [ms]
                               press a zoom direction for ms milliseconds (default 150) then stop
   ZVZoom [-v] abs <value>     EXPERIMENTAL: write property 0xD214 directly
@@ -103,6 +104,26 @@ func runCLI(_ args: [String]) async -> Int32 {
                 print("  now \(st)")
             }
             print("done: \(final) (target pos \(target))")
+
+        case "calib":
+            // Characterize the lens response: pulse lengths vs positions moved, both directions.
+            let lengths = args.count >= 2 ? args.dropFirst().compactMap { Int($0) } : [100, 150, 200, 250, 300, 400, 600]
+            var st = try await cam.waitUntilZoomReady()
+            print("start: \(st)")
+            print(" pulse_ms  dir   from   to   moved  settle_s")
+            for ms in lengths {
+                for dir in [SonyCamera.ZoomDirection.tele, .wide] {
+                    let from = st.barPosition ?? -1
+                    let t0 = Date()
+                    try await cam.zoom(dir)
+                    try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+                    try await cam.zoom(.stop)
+                    st = try await cam.waitUntilZoomSettled()
+                    let to = st.barPosition ?? -1
+                    print(String(format: " %7d  %@  %4d  %4d  %5d  %6.1f", ms, dir == .tele ? "tele" : "wide", from, to, to - from, Date().timeIntervalSince(t0)))
+                }
+            }
+            print("end: \(st)")
 
         case "roundtrip":
             // Save the current position, move away, restore, report the error.
