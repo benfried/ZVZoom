@@ -341,14 +341,39 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
         try await control(SonyProp.zoomOperation, dir.rawValue, type: type)
     }
 
-    /// Wait until the camera reports zoom as usable (lens extended after power-on).
-    func waitUntilZoomReady(timeout: TimeInterval = 10) async throws {
+    /// Wait until the camera reports zoom as usable: ZoomEnableStatus set and a nonzero
+    /// ZoomScale. On the ZV-1, ZoomScale reads 0 for a short time after the handshake.
+    @discardableResult
+    func waitUntilZoomReady(timeout: TimeInterval = 10) async throws -> ZoomState {
         let deadline = Date().addingTimeInterval(timeout)
+        var last: ZoomState?
         while Date() < deadline {
-            if let st = try? await zoomState(), st.enabled { return }
-            try await Task.sleep(nanoseconds: 250_000_000)
+            if let st = try? await zoomState() {
+                last = st
+                if st.enabled && st.scale > 0 { return st }
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
         }
-        throw PTPError(opcode: 0, message: "zoom not ready after \(timeout)s")
+        throw PTPError(opcode: 0, message: "zoom not ready after \(timeout)s (last: \(last.map { "\($0)" } ?? "none"))")
+    }
+
+    /// Poll ZoomScale until it stops changing (two identical reads in a row), or the timeout.
+    /// The ZV-1 keeps reporting the old value for a few hundred ms after the lens stops.
+    @discardableResult
+    func waitUntilZoomSettled(timeout: TimeInterval = 2.5, interval: UInt64 = 200_000_000,
+                              progress: ((ZoomState) -> Void)? = nil) async throws -> ZoomState {
+        let deadline = Date().addingTimeInterval(timeout)
+        var prev: Int64 = -1
+        var st = try await zoomState()
+        progress?(st)
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: interval)
+            st = try await zoomState()
+            progress?(st)
+            if st.scale > 0 && st.scale == prev { return st }
+            prev = st.scale
+        }
+        return st
     }
 
     /// Drive the zoom to a target ZoomScale value (magnification * 1000) using ZoomOperation
@@ -358,9 +383,9 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
                   maxIterations: Int = 40, progress: ((ZoomState) -> Void)? = nil) async throws -> Int64 {
         var last: Int64 = -1
         var stalls = 0
+        try await waitUntilZoomReady()
         for i in 0..<maxIterations {
-            let st = try await zoomState()
-            progress?(st)
+            let st = try await waitUntilZoomSettled(progress: progress)
             let diff = target - st.scale
             if abs(diff) <= tolerance {
                 Log.info("zoom at target: \(st)")
@@ -391,7 +416,7 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
                 try await Task.sleep(nanoseconds: UInt64(pulseMs) * 1_000_000)
                 try await zoom(.stop)
             }
-            try await Task.sleep(nanoseconds: 200_000_000) // let the lens settle before reading
+            // The next loop iteration waits for the reported scale to settle.
         }
         let final = try await zoomState()
         Log.info("zoom loop exhausted at \(final)")

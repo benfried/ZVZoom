@@ -82,7 +82,7 @@ func runCLI(_ args: [String]) async -> Int32 {
             print("zoom: \(z)")
 
         case "get":
-            let z = try await cam.zoomState()
+            let z = try await cam.waitUntilZoomReady()
             print("zoom: \(z)")
 
         case "set":
@@ -104,15 +104,18 @@ func runCLI(_ args: [String]) async -> Int32 {
             case "wide", "out", "-": dir = .wide
             default: dir = .stop
             }
-            let before = try await cam.zoomState()
+            let before = try await cam.waitUntilZoomReady()
             print("before: \(before)")
+            let t0 = Date()
             try await cam.zoom(dir)
             if dir != .stop {
                 try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
                 try await cam.zoom(.stop)
-                try await Task.sleep(nanoseconds: 300_000_000)
             }
-            let after = try await cam.zoomState()
+            // Show how the reported scale settles after the stop.
+            let after = try await cam.waitUntilZoomSettled(timeout: 3) { st in
+                print(String(format: "  +%4.0f ms  %@", Date().timeIntervalSince(t0) * 1000, "\(st)"))
+            }
             print("after:  \(after)")
 
         case "abs":
