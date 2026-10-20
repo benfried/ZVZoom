@@ -363,21 +363,32 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     /// Poll the zoom report until it stops changing. The ZV-1 keeps reporting the old value
     /// for ~500 ms after the lens stops, so this first waits `minWait`, then requires two
     /// identical consecutive reads (scale and bar position).
+    /// Measured on the ZV-1: the report updates roughly 0.6 to 1.2 s after the stop command.
+    static var settleMinWait: TimeInterval = 1.3
+    static var settleEqualReads = 3
+
     @discardableResult
-    func waitUntilZoomSettled(minWait: TimeInterval = 0.7, timeout: TimeInterval = 3.0,
+    func waitUntilZoomSettled(minWait: TimeInterval? = nil, timeout: TimeInterval = 4.0,
                               interval: UInt64 = 200_000_000,
                               progress: ((ZoomState) -> Void)? = nil) async throws -> ZoomState {
-        if minWait > 0 { try await Task.sleep(nanoseconds: UInt64(minWait * 1_000_000_000)) }
+        let wait = minWait ?? Self.settleMinWait
+        if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
         let deadline = Date().addingTimeInterval(timeout)
         var st = try await zoomState()
         progress?(st)
         var prev = (st.scale, st.barPosition ?? -1)
+        var equal = 1
         while Date() < deadline {
             try await Task.sleep(nanoseconds: interval)
             st = try await zoomState()
             progress?(st)
             let cur = (st.scale, st.barPosition ?? -1)
-            if st.scale > 0 && cur == prev { return st }
+            if st.scale > 0 && cur == prev {
+                equal += 1
+                if equal >= Self.settleEqualReads { return st }
+            } else {
+                equal = 1
+            }
             prev = cur
         }
         return st

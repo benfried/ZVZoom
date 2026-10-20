@@ -110,7 +110,7 @@ func runCLI(_ args: [String]) async -> Int32 {
             let lengths = args.count >= 2 ? args.dropFirst().compactMap { Int($0) } : [100, 150, 200, 250, 300, 400, 600]
             var st = try await cam.waitUntilZoomReady()
             print("start: \(st)")
-            print(" pulse_ms  dir   from   to   moved  settle_s")
+            print(" pulse_ms  dir   from   to   moved  first_change_s  last_change_s   (times from the start command; polled for 3 s after stop)")
             for ms in lengths {
                 for dir in [SonyCamera.ZoomDirection.tele, .wide] {
                     let from = st.barPosition ?? -1
@@ -118,9 +118,23 @@ func runCLI(_ args: [String]) async -> Int32 {
                     try await cam.zoom(dir)
                     try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
                     try await cam.zoom(.stop)
-                    st = try await cam.waitUntilZoomSettled()
+                    // Poll quickly for 3 s after the stop and note when the report changes.
+                    var firstChange: TimeInterval = -1, lastChange: TimeInterval = -1
+                    var prevPos = from
+                    let deadline = Date().addingTimeInterval(3.0)
+                    while Date() < deadline {
+                        st = try await cam.zoomState()
+                        let p = st.barPosition ?? -1
+                        if p != prevPos {
+                            let t = Date().timeIntervalSince(t0)
+                            if firstChange < 0 { firstChange = t }
+                            lastChange = t
+                            prevPos = p
+                        }
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                    }
                     let to = st.barPosition ?? -1
-                    print(String(format: " %7d  %@  %4d  %4d  %5d  %6.1f", ms, dir == .tele ? "tele" : "wide", from, to, to - from, Date().timeIntervalSince(t0)))
+                    print(String(format: " %7d  %@  %4d  %4d  %5d  %14.2f  %13.2f", ms, dir == .tele ? "tele" : "wide", from, to, to - from, firstChange, lastChange))
                 }
             }
             print("end: \(st)")
