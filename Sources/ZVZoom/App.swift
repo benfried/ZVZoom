@@ -12,8 +12,16 @@ struct ZVZoomApp: App {
         MenuBarExtra {
             MenuContent(controller: controller)
         } label: {
-            Image(systemName: "camera.aperture")
+            MenuLabel(controller: controller)
         }
+    }
+}
+
+struct MenuLabel: View {
+    @ObservedObject var controller: ZoomController
+
+    var body: some View {
+        Image(nsImage: controller.status == .noCamera ? MenuIcon.disconnected : MenuIcon.connected)
     }
 }
 
