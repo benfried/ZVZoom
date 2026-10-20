@@ -28,7 +28,7 @@ struct MenuContent: View {
         Button("Save Current Zoom") { controller.savePreset() }
             .disabled(controller.status == .noCamera)
         Button("Restore Saved Zoom") { controller.restoreNow() }
-            .disabled(controller.status == .noCamera || controller.presetScale == nil)
+            .disabled(controller.status == .noCamera || !controller.hasPreset)
         Toggle("Restore Automatically on Connect", isOn: $controller.restoreOnConnect)
         Divider()
         Button("Zoom In (nudge)") { controller.nudge(.tele) }
@@ -41,7 +41,7 @@ struct MenuContent: View {
         Button("Reconnect") { controller.reconnect() }
             .disabled(controller.status == .noCamera)
         Button("Clear Saved Zoom") { controller.clearPreset() }
-            .disabled(controller.presetScale == nil)
+            .disabled(!controller.hasPreset)
         Button("Open Log") {
             NSWorkspace.shared.open(Log.url)
         }

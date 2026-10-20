@@ -309,8 +309,11 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
         var typeStatus: Int64?
 
         var magnification: Double { Double(scale) / 1000 }
+        /// Low byte of ZoomBarInformation: the zoom bar position. Finer than ZoomScale on the ZV-1.
+        var barPosition: Int? { barInfo.map { Int($0 & 0xFF) } }
         var description: String {
             var s = String(format: "x%.2f (scale %lld)", magnification, scale) + " enabled=\(enabled ? "yes" : "no")"
+            if let p = barPosition { s += " pos=\(p)" }
             if let b = barInfo { s += " bar=0x" + String(UInt64(bitPattern: b), radix: 16) }
             if let a = absolute { s += " abs=\(a)" }
             if let t = setting { s += " setting=\(t)" }
@@ -357,69 +360,84 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
         throw PTPError(opcode: 0, message: "zoom not ready after \(timeout)s (last: \(last.map { "\($0)" } ?? "none"))")
     }
 
-    /// Poll ZoomScale until it stops changing (two identical reads in a row), or the timeout.
-    /// The ZV-1 keeps reporting the old value for a few hundred ms after the lens stops.
+    /// Poll the zoom report until it stops changing. The ZV-1 keeps reporting the old value
+    /// for ~500 ms after the lens stops, so this first waits `minWait`, then requires two
+    /// identical consecutive reads (scale and bar position).
     @discardableResult
-    func waitUntilZoomSettled(timeout: TimeInterval = 2.5, interval: UInt64 = 200_000_000,
+    func waitUntilZoomSettled(minWait: TimeInterval = 0.7, timeout: TimeInterval = 3.0,
+                              interval: UInt64 = 200_000_000,
                               progress: ((ZoomState) -> Void)? = nil) async throws -> ZoomState {
+        if minWait > 0 { try await Task.sleep(nanoseconds: UInt64(minWait * 1_000_000_000)) }
         let deadline = Date().addingTimeInterval(timeout)
-        var prev: Int64 = -1
         var st = try await zoomState()
         progress?(st)
+        var prev = (st.scale, st.barPosition ?? -1)
         while Date() < deadline {
             try await Task.sleep(nanoseconds: interval)
             st = try await zoomState()
             progress?(st)
-            if st.scale > 0 && st.scale == prev { return st }
-            prev = st.scale
+            let cur = (st.scale, st.barPosition ?? -1)
+            if st.scale > 0 && cur == prev { return st }
+            prev = cur
         }
         return st
     }
 
-    /// Drive the zoom to a target ZoomScale value (magnification * 1000) using ZoomOperation
-    /// pulses with ZoomScale feedback. Returns the final scale.
-    @discardableResult
-    func moveZoom(toScale target: Int64, tolerance: Int64 = 50, pulseMs: Int = 80,
-                  maxIterations: Int = 40, progress: ((ZoomState) -> Void)? = nil) async throws -> Int64 {
-        var last: Int64 = -1
-        var stalls = 0
-        try await waitUntilZoomReady()
-        for i in 0..<maxIterations {
-            let st = try await waitUntilZoomSettled(progress: progress)
-            let diff = target - st.scale
-            if abs(diff) <= tolerance {
-                Log.info("zoom at target: \(st)")
-                return st.scale
+    /// Which number the restore loop steers by.
+    enum ZoomMetric {
+        case bar    // ZoomBarInformation low byte, tolerance in positions
+        case scale  // ZoomScale, tolerance in magnification*1000
+
+        func value(_ st: ZoomState) -> Int {
+            switch self {
+            case .bar: return st.barPosition ?? Int(st.scale)
+            case .scale: return Int(st.scale)
             }
-            if st.scale == last { stalls += 1 } else { stalls = 0 }
-            last = st.scale
-            if stalls >= 6 {
-                Log.info("zoom not moving, giving up at \(st)")
-                return st.scale
+        }
+    }
+
+    /// Drive the zoom to `target` measured in `metric`, with pulses of ZoomOperation sized from
+    /// an adaptive estimate of ms per unit, and the report left to settle between pulses.
+    @discardableResult
+    func moveZoom(to target: Int, metric: ZoomMetric = .bar, tolerance: Int = 1,
+                  msPerUnit initialRate: Double = 15, minPulseMs: Double = 40, maxPulseMs: Double = 2500,
+                  maxIterations: Int = 12, progress: ((ZoomState) -> Void)? = nil) async throws -> ZoomState {
+        var rate = initialRate
+        var stalls = 0
+        var st = try await waitUntilZoomReady()
+        progress?(st)
+        for i in 0..<maxIterations {
+            let cur = metric.value(st)
+            let diff = target - cur
+            if abs(diff) <= tolerance {
+                Log.info("zoom at target (\(metric)=\(cur), target \(target)): \(st)")
+                return st
             }
             let dir: ZoomDirection = diff > 0 ? .tele : .wide
-            let far = abs(diff) >= 500
-            Log.debug("iteration \(i): scale \(st.scale) target \(target) -> \(dir) \(far ? "continuous" : "pulse")")
+            // Undershoot slightly on purpose; hunting past the target costs a full extra cycle.
+            let ms = min(max(Double(abs(diff)) * rate * 0.85, minPulseMs), maxPulseMs)
+            Log.info("iteration \(i): \(metric)=\(cur) target=\(target) -> \(dir) for \(Int(ms)) ms (rate \(String(format: "%.1f", rate)) ms/unit)")
             try await zoom(dir)
-            if far {
-                // Drive continuously, poll, stop when close.
-                let deadline = Date().addingTimeInterval(5)
-                while Date() < deadline {
-                    try await Task.sleep(nanoseconds: 60_000_000)
-                    let now = try await zoomState()
-                    progress?(now)
-                    let remaining = target - now.scale
-                    if abs(remaining) < 300 || (remaining > 0) != (diff > 0) { break }
-                }
-                try await zoom(.stop)
+            try await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+            try await zoom(.stop)
+            let after = try await waitUntilZoomSettled(progress: progress)
+            let moved = abs(metric.value(after) - cur)
+            if moved > 0 {
+                let observed = ms / Double(moved)
+                rate = 0.5 * rate + 0.5 * min(max(observed, 2), 200)
+                stalls = 0
             } else {
-                try await Task.sleep(nanoseconds: UInt64(pulseMs) * 1_000_000)
-                try await zoom(.stop)
+                stalls += 1
+                if stalls >= 3 {
+                    Log.info("zoom not moving after 3 pulses, giving up at \(after)")
+                    return after
+                }
+                rate *= 1.5 // pulse was too short to move the lens; try longer
             }
-            // The next loop iteration waits for the reported scale to settle.
+            st = after
         }
-        let final = try await zoomState()
-        Log.info("zoom loop exhausted at \(final)")
-        return final.scale
+        Log.info("zoom loop exhausted at \(st)")
+        return st
     }
+
 }

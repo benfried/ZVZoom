@@ -5,7 +5,13 @@ import Combine
 enum Settings {
     private static let d = UserDefaults.standard
 
-    /// Saved zoom as ZoomScale (magnification * 1000). nil = nothing saved yet.
+    /// Saved zoom bar position (ZoomBarInformation low byte). nil = nothing saved yet.
+    static var presetBar: Int? {
+        get { d.object(forKey: "presetBar") == nil ? nil : d.integer(forKey: "presetBar") }
+        set { if let v = newValue { d.set(v, forKey: "presetBar") } else { d.removeObject(forKey: "presetBar") } }
+    }
+
+    /// Saved ZoomScale (magnification * 1000), kept for display and as a fallback metric.
     static var presetScale: Int64? {
         get { d.object(forKey: "presetScale") == nil ? nil : Int64(d.integer(forKey: "presetScale")) }
         set { if let v = newValue { d.set(Int(v), forKey: "presetScale") } else { d.removeObject(forKey: "presetScale") } }
@@ -16,16 +22,22 @@ enum Settings {
         set { d.set(newValue, forKey: "restoreOnConnect") }
     }
 
-    /// How long a single zoom pulse lasts when fine-tuning (ms).
-    static var pulseMs: Int {
-        get { d.object(forKey: "pulseMs") == nil ? 80 : d.integer(forKey: "pulseMs") }
-        set { d.set(newValue, forKey: "pulseMs") }
+    /// Length of a manual nudge pulse (ms).
+    static var nudgeMs: Int {
+        get { d.object(forKey: "nudgeMs") == nil ? 80 : d.integer(forKey: "nudgeMs") }
+        set { d.set(newValue, forKey: "nudgeMs") }
     }
 
-    /// Accept this much ZoomScale error (ZV-1 reports in steps of 100 at the wide end).
-    static var tolerance: Int64 {
-        get { d.object(forKey: "tolerance") == nil ? 50 : Int64(d.integer(forKey: "tolerance")) }
-        set { d.set(Int(newValue), forKey: "tolerance") }
+    /// Accepted error in bar positions when restoring.
+    static var tolerance: Int {
+        get { d.object(forKey: "tolerance") == nil ? 1 : d.integer(forKey: "tolerance") }
+        set { d.set(newValue, forKey: "tolerance") }
+    }
+
+    /// Initial estimate of lens travel time per bar position (ms). Refined during each restore.
+    static var msPerUnit: Double {
+        get { d.object(forKey: "msPerUnit") == nil ? 15 : d.double(forKey: "msPerUnit") }
+        set { d.set(newValue, forKey: "msPerUnit") }
     }
 
     /// Seconds to wait after the camera appears before talking to it (ZV-1 needs ~3 s).
@@ -58,6 +70,7 @@ final class ZoomController: ObservableObject {
 
     @Published var status: Status = .noCamera
     @Published var currentZoom: SonyCamera.ZoomState?
+    @Published var presetBar: Int? = Settings.presetBar
     @Published var presetScale: Int64? = Settings.presetScale
     @Published var restoreOnConnect: Bool = Settings.restoreOnConnect {
         didSet { Settings.restoreOnConnect = restoreOnConnect }
@@ -73,14 +86,21 @@ final class ZoomController: ObservableObject {
         watcher.start()
     }
 
+    var hasPreset: Bool { presetBar != nil || presetScale != nil }
+
     var presetText: String {
-        guard let p = presetScale else { return "No zoom saved" }
-        return String(format: "Saved zoom: x%.2f", Double(p) / 1000)
+        guard hasPreset else { return "No zoom saved" }
+        var s = "Saved zoom:"
+        if let sc = presetScale { s += String(format: " x%.2f", Double(sc) / 1000) }
+        if let b = presetBar { s += " (pos \(b))" }
+        return s
     }
 
     var zoomText: String {
         guard let z = currentZoom else { return "Zoom: –" }
-        return String(format: "Zoom: x%.2f", z.magnification)
+        var s = String(format: "Zoom: x%.2f", z.magnification)
+        if let p = z.barPosition { s += " (pos \(p))" }
+        return s
     }
 
     // MARK: Events
@@ -92,11 +112,10 @@ final class ZoomController: ObservableObject {
             do {
                 try await Task.sleep(nanoseconds: UInt64(Settings.connectDelay * 1_000_000_000))
                 try await cam.handshake()
-                try await cam.waitUntilZoomReady()
-                currentZoom = try await cam.zoomState()
+                currentZoom = try await cam.waitUntilZoomReady()
                 status = .ready
                 Log.info("camera ready, zoom \(currentZoom!)")
-                if restoreOnConnect, presetScale != nil {
+                if restoreOnConnect, hasPreset {
                     await restore()
                 }
             } catch {
@@ -125,11 +144,13 @@ final class ZoomController: ObservableObject {
         guard let cam = camera, !busy else { return }
         Task {
             do {
-                let st = try await cam.zoomState()
+                let st = try await cam.waitUntilZoomReady()
                 currentZoom = st
+                presetBar = st.barPosition
                 presetScale = st.scale
+                Settings.presetBar = st.barPosition
                 Settings.presetScale = st.scale
-                Log.info("saved preset scale \(st.scale)")
+                Log.info("saved preset: \(st)")
             } catch {
                 status = .failed("\(error)")
             }
@@ -137,7 +158,9 @@ final class ZoomController: ObservableObject {
     }
 
     func clearPreset() {
+        presetBar = nil
         presetScale = nil
+        Settings.presetBar = nil
         Settings.presetScale = nil
     }
 
@@ -146,19 +169,26 @@ final class ZoomController: ObservableObject {
     }
 
     private func restore() async {
-        guard let cam = camera, let target = presetScale, !busy else { return }
+        guard let cam = camera, hasPreset, !busy else { return }
         busy = true
         defer { busy = false }
-        status = .working(String(format: "Restoring zoom to x%.2f…", Double(target) / 1000))
+        status = .working("Restoring zoom…")
         do {
-            try await cam.waitUntilZoomReady()
-            let final = try await cam.moveZoom(toScale: target, tolerance: Settings.tolerance,
-                                               pulseMs: Settings.pulseMs) { [weak self] st in
-                self?.currentZoom = st
+            let final: SonyCamera.ZoomState
+            if let b = presetBar {
+                final = try await cam.moveZoom(to: b, metric: .bar, tolerance: Settings.tolerance,
+                                               msPerUnit: Settings.msPerUnit) { [weak self] st in
+                    self?.currentZoom = st
+                }
+            } else {
+                final = try await cam.moveZoom(to: Int(presetScale!), metric: .scale, tolerance: 50,
+                                               msPerUnit: Settings.msPerUnit / 25) { [weak self] st in
+                    self?.currentZoom = st
+                }
             }
-            currentZoom = try await cam.zoomState()
+            currentZoom = final
             status = .ready
-            Log.info("restore finished at scale \(final)")
+            Log.info("restore finished at \(final)")
         } catch {
             Log.error("restore failed: \(error)")
             status = .failed("\(error)")
@@ -173,10 +203,9 @@ final class ZoomController: ObservableObject {
             defer { busy = false }
             do {
                 try await cam.zoom(dir)
-                try await Task.sleep(nanoseconds: UInt64(Settings.pulseMs) * 1_000_000)
+                try await Task.sleep(nanoseconds: UInt64(Settings.nudgeMs) * 1_000_000)
                 try await cam.zoom(.stop)
-                try await Task.sleep(nanoseconds: 200_000_000)
-                currentZoom = try await cam.zoomState()
+                currentZoom = try await cam.waitUntilZoomSettled()
                 status = .ready
             } catch {
                 status = .failed("\(error)")

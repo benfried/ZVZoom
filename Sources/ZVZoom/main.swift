@@ -12,7 +12,9 @@ usage:
   ZVZoom                      run the menubar app
   ZVZoom [-v] dump            handshake, then print every property the camera reports
   ZVZoom [-v] get             print the current zoom state
-  ZVZoom [-v] set <mag>       drive the zoom to a magnification, e.g. 1.8
+  ZVZoom [-v] set <mag>       drive the zoom to a magnification, e.g. 1.8 (coarse: ZoomScale)
+  ZVZoom [-v] pos <n>         drive the zoom to a bar position (fine: ZoomBarInformation)
+  ZVZoom [-v] roundtrip       save the current position, zoom away, restore, report the error
   ZVZoom [-v] op <tele|wide|stop> [ms]
                               press a zoom direction for ms milliseconds (default 150) then stop
   ZVZoom [-v] abs <value>     EXPERIMENTAL: write property 0xD214 directly
@@ -87,13 +89,39 @@ func runCLI(_ args: [String]) async -> Int32 {
 
         case "set":
             guard args.count >= 2, let mag = Double(args[1]) else { print(usage); return 2 }
-            let target = Int64((mag * 1000).rounded())
-            try await cam.waitUntilZoomReady()
-            let final = try await cam.moveZoom(toScale: target, tolerance: Settings.tolerance,
-                                               pulseMs: Settings.pulseMs) { st in
+            let target = Int((mag * 1000).rounded())
+            let final = try await cam.moveZoom(to: target, metric: .scale, tolerance: 50,
+                                               msPerUnit: Settings.msPerUnit / 25) { st in
                 print("  now \(st)")
             }
-            print(String(format: "done: x%.2f (target x%.2f)", Double(final) / 1000, mag))
+            print(String(format: "done: x%.2f (target x%.2f)", final.magnification, mag))
+
+        case "pos":
+            guard args.count >= 2, let target = Int(args[1]) else { print(usage); return 2 }
+            let final = try await cam.moveZoom(to: target, metric: .bar, tolerance: Settings.tolerance,
+                                               msPerUnit: Settings.msPerUnit) { st in
+                print("  now \(st)")
+            }
+            print("done: \(final) (target pos \(target))")
+
+        case "roundtrip":
+            // Save the current position, move away, restore, report the error.
+            let start = try await cam.waitUntilZoomReady()
+            guard let home = start.barPosition else { print("no bar position reported"); return 1 }
+            print("start: \(start)")
+            let awayDir: SonyCamera.ZoomDirection = home < 30 ? .tele : .wide
+            try await cam.zoom(awayDir)
+            try await Task.sleep(nanoseconds: 600_000_000)
+            try await cam.zoom(.stop)
+            let away = try await cam.waitUntilZoomSettled()
+            print("moved away: \(away)")
+            let t0 = Date()
+            let final = try await cam.moveZoom(to: home, metric: .bar, tolerance: Settings.tolerance,
+                                               msPerUnit: Settings.msPerUnit) { st in
+                print(String(format: "  +%4.1f s  %@", Date().timeIntervalSince(t0), "\(st)"))
+            }
+            print("restored: \(final)")
+            print("error: \((final.barPosition ?? -1) - home) positions, took \(String(format: "%.1f", Date().timeIntervalSince(t0))) s")
 
         case "op":
             guard args.count >= 2 else { print(usage); return 2 }
