@@ -70,7 +70,7 @@ func runCLI(_ args: [String]) async -> Int32 {
             // No session, no handshake: just bounce the USB connection and watch what happens.
             let vid = cam.device.usbVendorID, pid = cam.device.usbProductID
             print("re-enumerating USB device \(String(vid, radix: 16)):\(String(pid, radix: 16))")
-            try USBReset.reenumerate(vendorID: vid, productID: pid)
+            try USBReset.reenumerate(vendorID: Int(vid), productID: Int(pid))
             print("re-enumeration requested; watching for 8 s")
             try await Task.sleep(nanoseconds: 8_000_000_000)
             print("camera present now: \(watcher.camera != nil)")
