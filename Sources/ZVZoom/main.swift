@@ -247,7 +247,19 @@ func runCLI(_ args: [String]) async -> Int32 {
         return 1
     }
     }()
-    await camRef?.close()
+    if let cam = camRef {
+        await cam.close()
+        if Settings.bounceUSBAfterSession {
+            // Leave the camera as we found it: a Sony remote session switches HDMI off until
+            // the next USB disconnect, and a software re-enumeration counts as one.
+            do {
+                try USBReset.reenumerate(vendorID: Int(cam.device.usbVendorID), productID: Int(cam.device.usbProductID))
+                print("USB re-enumerated so the camera leaves remote mode")
+            } catch {
+                print("USB re-enumeration failed: \(error)")
+            }
+        }
+    }
     return code
 }
 

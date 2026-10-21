@@ -40,6 +40,14 @@ enum Settings {
         set { d.set(newValue, forKey: "msPerUnit") }
     }
 
+    /// After each session, re-enumerate the camera on the USB bus. The ZV-1 switches off
+    /// its HDMI output when a PC Remote session starts and only switches it back on after a
+    /// USB disconnect; a software re-enumeration counts as one.
+    static var bounceUSBAfterSession: Bool {
+        get { d.object(forKey: "bounceUSBAfterSession") == nil ? true : d.bool(forKey: "bounceUSBAfterSession") }
+        set { d.set(newValue, forKey: "bounceUSBAfterSession") }
+    }
+
     /// Seconds to wait after the zoom reports ready before the first restore pulse.
     static var zoomWarmup: Double {
         get { d.object(forKey: "zoomWarmup") == nil ? 2.0 : d.double(forKey: "zoomWarmup") }
@@ -92,6 +100,8 @@ final class ZoomController: ObservableObject {
     private var camera: SonyCamera?
     private var busy = false
     private var animationTimer: Timer?
+    /// Set when we re-enumerated the camera ourselves; the next remove/add pair is ours.
+    private var bounceStarted: Date?
 
     init() {
         watcher.onAttach = { [weak self] cam in self?.attached(cam) }
@@ -138,6 +148,14 @@ final class ZoomController: ObservableObject {
 
     private func attached(_ cam: SonyCamera) {
         camera = cam
+        if let t = bounceStarted, Date().timeIntervalSince(t) < 15 {
+            // The camera came back from our own USB bounce. The lens is where we left it and
+            // any new session would switch HDMI off again, so leave it alone.
+            bounceStarted = nil
+            status = .idle
+            Log.info("camera back after USB bounce; staying hands-off")
+            return
+        }
         status = .connecting
         Task {
             do {
@@ -158,8 +176,10 @@ final class ZoomController: ObservableObject {
 
     private func detached() {
         camera = nil
-        currentZoom = nil
-        status = .noCamera
+        if bounceStarted == nil {
+            currentZoom = nil
+            status = .noCamera
+        }
     }
 
     /// Open a session, do one thing, close the session. Serialized by `busy`.
@@ -169,12 +189,32 @@ final class ZoomController: ObservableObject {
         busy = true
         defer { busy = false }
         status = .working(label)
+        var failure: Error?
         do {
             try await cam.withSession { try await body(cam) }
-            status = .idle
         } catch {
-            status = .failed("\(error)")
-            throw error
+            failure = error
+        }
+        if Settings.bounceUSBAfterSession {
+            bounceUSB(cam)
+        }
+        if let e = failure {
+            status = .failed("\(e)")
+            throw e
+        }
+        status = .idle
+    }
+
+    /// Re-enumerate the camera so it leaves Sony's remote mode (and turns HDMI back on).
+    private func bounceUSB(_ cam: SonyCamera) {
+        let vid = Int(cam.device.usbVendorID), pid = Int(cam.device.usbProductID)
+        do {
+            bounceStarted = Date()
+            try USBReset.reenumerate(vendorID: vid, productID: pid)
+            Log.info("USB re-enumeration requested")
+        } catch {
+            bounceStarted = nil
+            Log.error("USB re-enumeration failed: \(error)")
         }
     }
 
