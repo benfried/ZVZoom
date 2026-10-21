@@ -59,7 +59,7 @@ final class ZoomController: ObservableObject {
     enum Status: Equatable {
         case noCamera
         case connecting
-        case ready
+        case idle          // camera present, no session open
         case working(String)
         case failed(String)
 
@@ -67,24 +67,31 @@ final class ZoomController: ObservableObject {
             switch self {
             case .noCamera: return "Camera: not found"
             case .connecting: return "Camera: connecting…"
-            case .ready: return "Camera: ready"
+            case .idle: return "Camera: connected"
             case .working(let s): return s
             case .failed(let s): return "Error: \(s)"
             }
         }
+
+        var isWorking: Bool { if case .working = self { return true } else { return false } }
     }
 
-    @Published var status: Status = .noCamera
+    @Published var status: Status = .noCamera {
+        didSet { updateAnimation() }
+    }
     @Published var currentZoom: SonyCamera.ZoomState?
     @Published var presetBar: Int? = Settings.presetBar
     @Published var presetScale: Int64? = Settings.presetScale
     @Published var restoreOnConnect: Bool = Settings.restoreOnConnect {
         didSet { Settings.restoreOnConnect = restoreOnConnect }
     }
+    /// Frame index for the menubar animation while working.
+    @Published var animationFrame = 0
 
     let watcher = CameraWatcher()
     private var camera: SonyCamera?
     private var busy = false
+    private var animationTimer: Timer?
 
     init() {
         watcher.onAttach = { [weak self] cam in self?.attached(cam) }
@@ -109,6 +116,24 @@ final class ZoomController: ObservableObject {
         return s
     }
 
+    // MARK: Animation
+
+    private func updateAnimation() {
+        if status.isWorking {
+            guard animationTimer == nil else { return }
+            animationTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.animationFrame = (self.animationFrame + 1) % MenuIcon.workingFrameCount
+                }
+            }
+        } else {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            animationFrame = 0
+        }
+    }
+
     // MARK: Events
 
     private func attached(_ cam: SonyCamera) {
@@ -117,15 +142,12 @@ final class ZoomController: ObservableObject {
         Task {
             do {
                 try await Task.sleep(nanoseconds: UInt64(Settings.connectDelay * 1_000_000_000))
-                try await cam.handshake()
-                currentZoom = try await cam.waitUntilZoomReady()
-                status = .ready
-                Log.info("camera ready, zoom \(currentZoom!)")
                 if restoreOnConnect, hasPreset {
-                    // Right after power-on the ZV-1 reports zoom as enabled a moment before it
-                    // acts on ZoomOperation; the first pulse was lost without this pause.
-                    try await Task.sleep(nanoseconds: UInt64(Settings.zoomWarmup * 1_000_000_000))
-                    await restore()
+                    await restore(afterPowerOn: true)
+                } else {
+                    try await run("Reading zoom…") { cam in
+                        self.currentZoom = try await cam.waitUntilZoomReady()
+                    }
                 }
             } catch {
                 Log.error("connect failed: \(error)")
@@ -140,28 +162,42 @@ final class ZoomController: ObservableObject {
         status = .noCamera
     }
 
+    /// Open a session, do one thing, close the session. Serialized by `busy`.
+    private func run(_ label: String, _ body: (SonyCamera) async throws -> Void) async throws {
+        guard let cam = camera else { throw PTPError(opcode: 0, message: "no camera") }
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        status = .working(label)
+        do {
+            try await cam.withSession { try await body(cam) }
+            status = .idle
+        } catch {
+            status = .failed("\(error)")
+            throw error
+        }
+    }
+
     // MARK: Actions
 
     func refresh() {
-        guard let cam = camera, !busy else { return }
         Task {
-            do { currentZoom = try await cam.zoomState() } catch { status = .failed("\(error)") }
+            try? await run("Reading zoom…") { cam in
+                self.currentZoom = try await cam.waitUntilZoomReady()
+            }
         }
     }
 
     func savePreset() {
-        guard let cam = camera, !busy else { return }
         Task {
-            do {
+            try? await run("Saving zoom…") { cam in
                 let st = try await cam.waitUntilZoomReady()
-                currentZoom = st
-                presetBar = st.barPosition
-                presetScale = st.scale
+                self.currentZoom = st
+                self.presetBar = st.barPosition
+                self.presetScale = st.scale
                 Settings.presetBar = st.barPosition
                 Settings.presetScale = st.scale
                 Log.info("saved preset: \(st)")
-            } catch {
-                status = .failed("\(error)")
             }
         }
     }
@@ -174,57 +210,57 @@ final class ZoomController: ObservableObject {
     }
 
     func restoreNow() {
-        Task { await restore() }
+        Task { await restore(afterPowerOn: false) }
     }
 
-    private func restore() async {
-        guard let cam = camera, hasPreset, !busy else { return }
-        busy = true
-        defer { busy = false }
-        status = .working("Restoring zoom…")
+    private func restore(afterPowerOn: Bool) async {
+        guard hasPreset else { return }
         do {
-            let final: SonyCamera.ZoomState
-            if let b = presetBar {
-                final = try await cam.moveZoom(to: b, metric: .bar, tolerance: Settings.tolerance,
-                                               msPerUnit: Settings.msPerUnit) { [weak self] st in
-                    self?.currentZoom = st
+            try await run("Restoring zoom…") { cam in
+                self.currentZoom = try await cam.waitUntilZoomReady()
+                if afterPowerOn {
+                    // Right after power-on the ZV-1 reports zoom as enabled a moment before it
+                    // acts on ZoomOperation; the first pulse was lost without this pause.
+                    try await Task.sleep(nanoseconds: UInt64(Settings.zoomWarmup * 1_000_000_000))
                 }
-            } else {
-                final = try await cam.moveZoom(to: Int(presetScale!), metric: .scale, tolerance: 60,
-                                               msPerUnit: Settings.msPerUnit / 17, minStep: 120) { [weak self] st in
-                    self?.currentZoom = st
+                let final: SonyCamera.ZoomState
+                if let b = self.presetBar {
+                    final = try await cam.moveZoom(to: b, metric: .bar, tolerance: Settings.tolerance,
+                                                   msPerUnit: Settings.msPerUnit) { [weak self] st in
+                        self?.currentZoom = st
+                    }
+                } else {
+                    final = try await cam.moveZoom(to: Int(self.presetScale!), metric: .scale, tolerance: 60,
+                                                   msPerUnit: Settings.msPerUnit / 17, minStep: 120) { [weak self] st in
+                        self?.currentZoom = st
+                    }
                 }
+                self.currentZoom = final
+                Log.info("restore finished at \(final)")
             }
-            currentZoom = final
-            status = .ready
-            Log.info("restore finished at \(final)")
         } catch {
             Log.error("restore failed: \(error)")
-            status = .failed("\(error)")
         }
     }
 
     /// Nudge the zoom by one pulse in either direction.
     func nudge(_ dir: SonyCamera.ZoomDirection) {
-        guard let cam = camera, !busy else { return }
-        busy = true
         Task {
-            defer { busy = false }
-            do {
+            try? await run("Zooming…") { cam in
+                try await cam.waitUntilZoomReady()
                 try await cam.zoom(dir)
                 try await Task.sleep(nanoseconds: UInt64(Settings.nudgeMs) * 1_000_000)
                 try await cam.zoom(.stop)
-                currentZoom = try await cam.waitUntilZoomSettled()
-                status = .ready
-            } catch {
-                status = .failed("\(error)")
+                self.currentZoom = try await cam.waitUntilZoomSettled()
             }
         }
     }
 
     func reconnect() {
         guard let cam = camera else { return }
-        cam.close()
-        attached(cam)
+        Task {
+            await cam.close()
+            attached(cam)
+        }
     }
 }

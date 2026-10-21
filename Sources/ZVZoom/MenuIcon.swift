@@ -6,23 +6,37 @@ enum MenuIcon {
     static let size = NSSize(width: 22, height: 18)
 
     /// Filled compact camera with a windscreen on top: camera connected.
-    static let connected: NSImage = make { _ in
-        NSColor.black.setFill()
+    static let connected: NSImage = filled(lensRadius: 4.7)
 
-        // windscreen
-        NSBezierPath(roundedRect: NSRect(x: 7, y: 0.5, width: 9, height: 4.5), xRadius: 2.25, yRadius: 2.25).fill()
+    /// Frames for the "adjusting zoom" animation: the lens breathes in and out,
+    /// which reads as the barrel zooming.
+    static let workingFrameCount = 8
+    static let working: [NSImage] = (0..<workingFrameCount).map { i in
+        let t = Double(i) / Double(workingFrameCount)           // 0 ..< 1
+        let r = 4.7 - 1.3 * (1 - cos(2 * .pi * t)) / 2           // 4.7 -> 3.4 -> 4.7
+        return filled(lensRadius: r)
+    }
 
-        // body with the lens cut out
-        let body = NSBezierPath(roundedRect: NSRect(x: 0.5, y: 4.5, width: 21, height: 13), xRadius: 2, yRadius: 2)
-        body.appendOval(in: NSRect(x: 13 - 4.7, y: 11 - 4.7, width: 9.4, height: 9.4))
-        body.windingRule = .evenOdd
-        body.fill()
+    private static func filled(lensRadius: Double) -> NSImage {
+        make { _ in
+            NSColor.black.setFill()
 
-        // lens element
-        NSBezierPath(ovalIn: NSRect(x: 13 - 2.6, y: 11 - 2.6, width: 5.2, height: 5.2)).fill()
+            // windscreen
+            NSBezierPath(roundedRect: NSRect(x: 7, y: 0.5, width: 9, height: 4.5), xRadius: 2.25, yRadius: 2.25).fill()
 
-        // tally / AF lamp on the grip side
-        NSBezierPath(roundedRect: NSRect(x: 2.5, y: 6.5, width: 3, height: 1.5), xRadius: 0.75, yRadius: 0.75).fill()
+            // body with the lens cut out
+            let body = NSBezierPath(roundedRect: NSRect(x: 0.5, y: 4.5, width: 21, height: 13), xRadius: 2, yRadius: 2)
+            body.appendOval(in: NSRect(x: 13 - lensRadius, y: 11 - lensRadius, width: 2 * lensRadius, height: 2 * lensRadius))
+            body.windingRule = .evenOdd
+            body.fill()
+
+            // lens element, kept in proportion to the ring
+            let e = lensRadius * (2.6 / 4.7)
+            NSBezierPath(ovalIn: NSRect(x: 13 - e, y: 11 - e, width: 2 * e, height: 2 * e)).fill()
+
+            // tally / AF lamp on the grip side
+            NSBezierPath(roundedRect: NSRect(x: 2.5, y: 6.5, width: 3, height: 1.5), xRadius: 0.75, yRadius: 0.75).fill()
+        }
     }
 
     /// Outline version: no camera connected.

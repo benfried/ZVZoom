@@ -119,6 +119,7 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     func invalidate() {
         isOpen = false
         handshakeDone = false
+        priorityModeIsPC = false
         openContinuation?.resume(throwing: PTPError(opcode: 0, message: "device removed"))
         openContinuation = nil
     }
@@ -135,12 +136,17 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
         isOpen = true
     }
 
-    func close() {
-        if isOpen {
-            device.requestCloseSession()
-            isOpen = false
-            handshakeDone = false
+    func close() async {
+        guard isOpen else { return }
+        if priorityModeIsPC {
+            // Hand the controls back to the camera before leaving.
+            try? await setPriorityMode(pc: false)
         }
+        Log.info("closing session")
+        device.requestCloseSession()
+        isOpen = false
+        handshakeDone = false
+        priorityModeIsPC = false
     }
 
     nonisolated func device(_ device: ICDevice, didOpenSessionWithError error: (any Error)?) {
@@ -256,16 +262,39 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
 
         try await send(SonyOp.sdioConnect, [3, 0, 0])
 
-        // Newer bodies expose PriorityMode; set it to "PC" like libgphoto2 does. The ZV-1 does not have it.
-        if supportedCodes.contains(SonyProp.priorityMode) {
-            do {
-                try await setValue(SonyProp.priorityMode, 1, type: .int8)
-            } catch {
-                Log.info("PriorityMode not accepted: \(error)")
-            }
+        // libgphoto2 sets PriorityMode to "PC" here so the host owns the camera's controls.
+        // That is the kind of state that could disturb the camera's own outputs, so it is
+        // opt-in; zoom() falls back to setting it if the camera refuses ZoomOperation.
+        if Self.setPriorityModeOnConnect {
+            try await setPriorityMode(pc: true)
         }
         handshakeDone = true
         Log.info("handshake complete")
+    }
+
+    /// Whether the handshake claims PC priority up front (see handshake()).
+    static var setPriorityModeOnConnect = false
+    private(set) var priorityModeIsPC = false
+
+    func setPriorityMode(pc: Bool) async throws {
+        guard supportedCodes.contains(SonyProp.priorityMode) else { return }
+        try await setValue(SonyProp.priorityMode, pc ? 1 : 0, type: .uint8)
+        priorityModeIsPC = pc
+        Log.info("PriorityMode set to \(pc ? "PC" : "camera")")
+    }
+
+    /// Open a session, run `body`, and always close the session afterwards, so the camera is
+    /// left to itself between operations.
+    func withSession<T>(_ body: () async throws -> T) async throws -> T {
+        try await handshake()
+        do {
+            let result = try await body()
+            await close()
+            return result
+        } catch {
+            await close()
+            throw error
+        }
     }
 
     // MARK: Properties
@@ -341,7 +370,14 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
     /// Start or stop the power zoom. The lens keeps moving until .stop is sent.
     func zoom(_ dir: ZoomDirection) async throws {
         let type = props[SonyProp.zoomOperation]?.type ?? .int8
-        try await control(SonyProp.zoomOperation, dir.rawValue, type: type)
+        do {
+            try await control(SonyProp.zoomOperation, dir.rawValue, type: type)
+        } catch where !priorityModeIsPC {
+            // Some bodies only accept controls once the host holds priority. Claim it and retry.
+            Log.info("ZoomOperation refused (\(error)); claiming PC priority and retrying")
+            try await setPriorityMode(pc: true)
+            try await control(SonyProp.zoomOperation, dir.rawValue, type: type)
+        }
     }
 
     /// Wait until the camera reports zoom as usable: ZoomEnableStatus set and a nonzero

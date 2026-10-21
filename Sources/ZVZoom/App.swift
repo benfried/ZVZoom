@@ -21,7 +21,15 @@ struct MenuLabel: View {
     @ObservedObject var controller: ZoomController
 
     var body: some View {
-        Image(nsImage: controller.status == .noCamera ? MenuIcon.disconnected : MenuIcon.connected)
+        Image(nsImage: image)
+    }
+
+    private var image: NSImage {
+        switch controller.status {
+        case .noCamera: return MenuIcon.disconnected
+        case .working: return MenuIcon.working[controller.animationFrame % MenuIcon.workingFrameCount]
+        default: return MenuIcon.connected
+        }
     }
 }
 

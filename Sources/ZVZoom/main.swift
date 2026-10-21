@@ -57,7 +57,7 @@ func runCLI(_ args: [String]) async -> Int32 {
     let watcher = CameraWatcher()
     watcher.start()
     var camRef: SonyCamera?
-    defer { camRef?.close() }
+    let code: Int32 = await {
     do {
         print("waiting for camera…")
         let cam = try await waitForCamera(watcher)
@@ -216,6 +216,9 @@ func runCLI(_ args: [String]) async -> Int32 {
         print("error: \(error)")
         return 1
     }
+    }()
+    await camRef?.close()
+    return code
 }
 
 // ImageCaptureCore delivers its callbacks on the main run loop, so keep it spinning.
