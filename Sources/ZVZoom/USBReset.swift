@@ -24,6 +24,14 @@ enum USBReset {
         }
     }
 
+    // These are C macros in IOKit headers and are not imported into Swift.
+    private static let pluginInterfaceID = CFUUIDGetConstantUUIDWithBytes(nil,
+        0xC2, 0x44, 0xE8, 0x58, 0x10, 0x9C, 0x11, 0xD4, 0x91, 0xD4, 0x00, 0x50, 0xE4, 0xC6, 0x42, 0x6F)
+    private static let usbDeviceUserClientTypeID = CFUUIDGetConstantUUIDWithBytes(nil,
+        0x9d, 0xc7, 0xb7, 0x80, 0x9e, 0xc0, 0x11, 0xd4, 0xa5, 0x4f, 0x00, 0x0a, 0x27, 0x05, 0x28, 0x61)
+    private static let usbDeviceInterfaceID = CFUUIDGetConstantUUIDWithBytes(nil,
+        0x5c, 0x81, 0x87, 0xd0, 0x9e, 0xf3, 0x11, 0xD4, 0x8b, 0x45, 0x00, 0x0a, 0x27, 0x05, 0x28, 0x61)
+
     /// Find the first device matching vendor/product and ask the host to re-enumerate it.
     static func reenumerate(vendorID: Int, productID: Int) throws {
         guard let matching = IOServiceMatching(kIOUSBDeviceClassName) as NSMutableDictionary? else {
@@ -43,14 +51,14 @@ enum USBReset {
 
         var plugin: UnsafeMutablePointer<UnsafeMutablePointer<IOCFPlugInInterface>?>?
         var score: Int32 = 0
-        let pr = IOCreatePlugInInterfaceForService(service, kIOUSBDeviceUserClientTypeID, kIOCFPlugInInterfaceID, &plugin, &score)
+        let pr = IOCreatePlugInInterfaceForService(service, usbDeviceUserClientTypeID, pluginInterfaceID, &plugin, &score)
         guard pr == KERN_SUCCESS, let plugin else { throw Failure.plugin(pr) }
         defer { _ = plugin.pointee?.pointee.Release(plugin) }
 
         var deviceInterfacePtr: UnsafeMutableRawPointer?
         let qr = withUnsafeMutablePointer(to: &deviceInterfacePtr) { ptr -> HRESULT in
             ptr.withMemoryRebound(to: Optional<LPVOID>.self, capacity: 1) { lp in
-                plugin.pointee!.pointee.QueryInterface(plugin, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID), lp)
+                plugin.pointee!.pointee.QueryInterface(plugin, CFUUIDGetUUIDBytes(usbDeviceInterfaceID), lp)
             }
         }
         guard qr == S_OK, let raw = deviceInterfacePtr else { throw Failure.interface(qr) }
