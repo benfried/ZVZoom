@@ -122,6 +122,8 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
         priorityModeIsPC = false
         openContinuation?.resume(throwing: PTPError(opcode: 0, message: "device removed"))
         openContinuation = nil
+        closeContinuation?.resume(returning: true)
+        closeContinuation = nil
     }
 
     // MARK: Session
@@ -143,15 +145,27 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
             try? await setPriorityMode(pc: false)
         }
         Log.info("closing session")
-        do {
-            try await device.requestCloseSession(options: nil)
-        } catch {
-            Log.info("close session returned \(error)")
-        }
         isOpen = false
         handshakeDone = false
         priorityModeIsPC = false
+        // The async requestCloseSession(options:) never completed against the ZV-1 through
+        // ptpcamerad, so use the plain call and wait (briefly) for the delegate callback.
+        let plainClose: () -> Void = device.requestCloseSession
+        let closed: Bool = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            closeContinuation = c
+            plainClose()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if let cc = self.closeContinuation {
+                    self.closeContinuation = nil
+                    cc.resume(returning: false)
+                }
+            }
+        }
+        Log.info(closed ? "session closed" : "session close not confirmed within 3 s")
     }
+
+    private var closeContinuation: CheckedContinuation<Bool, Never>?
 
     nonisolated func device(_ device: ICDevice, didOpenSessionWithError error: (any Error)?) {
         Task { @MainActor in
@@ -168,9 +182,14 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
 
     nonisolated func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
         Task { @MainActor in
-            Log.info("session closed \(error.map { "(\($0))" } ?? "")")
+            if let e = error { Log.info("close session delegate error: \(e)") }
             self.isOpen = false
             self.handshakeDone = false
+            self.priorityModeIsPC = false
+            if let cc = self.closeContinuation {
+                self.closeContinuation = nil
+                cc.resume(returning: true)
+            }
         }
     }
 
