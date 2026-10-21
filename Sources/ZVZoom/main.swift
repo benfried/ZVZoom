@@ -21,6 +21,7 @@ usage:
   ZVZoom [-v] abs <value>     EXPERIMENTAL: write property 0xD214 directly
   ZVZoom [-v] prio <0|1>       set Sony PriorityMode (experiment)
   ZVZoom [-v] eject           close the session and ask macOS to eject the device (experiment)
+  ZVZoom [-v] usbreset        re-enumerate the camera on the USB bus (no session; experiment)
   ZVZoom [-v] raw <opcode> [p1 p2 ...]
                               send a data-in PTP operation (hex) and hex-dump the reply
   ZVZoom [-v] watch           print zoom state every second until Ctrl-C
@@ -64,6 +65,19 @@ func runCLI(_ args: [String]) async -> Int32 {
         print("waiting for camera…")
         let cam = try await waitForCamera(watcher)
         camRef = cam
+
+        if args[0] == "usbreset" {
+            // No session, no handshake: just bounce the USB connection and watch what happens.
+            let vid = cam.device.usbVendorID, pid = cam.device.usbProductID
+            print("re-enumerating USB device \(String(vid, radix: 16)):\(String(pid, radix: 16))")
+            try USBReset.reenumerate(vendorID: vid, productID: pid)
+            print("re-enumeration requested; watching for 8 s")
+            try await Task.sleep(nanoseconds: 8_000_000_000)
+            print("camera present now: \(watcher.camera != nil)")
+            camRef = nil
+            return 0
+        }
+
         print("found \(cam.device.name ?? "camera"), waiting \(Settings.connectDelay)s before handshake")
         try await Task.sleep(nanoseconds: UInt64(Settings.connectDelay * 1_000_000_000))
         try await cam.handshake()

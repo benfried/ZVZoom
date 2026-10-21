@@ -12,6 +12,7 @@ let package = Package(
                 .linkedFramework("ImageCaptureCore"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
+                .linkedFramework("IOKit"),
             ]
         )
     ]
