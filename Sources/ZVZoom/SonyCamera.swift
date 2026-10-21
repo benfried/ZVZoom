@@ -143,7 +143,11 @@ final class SonyCamera: NSObject, ICCameraDeviceDelegate {
             try? await setPriorityMode(pc: false)
         }
         Log.info("closing session")
-        device.requestCloseSession()
+        do {
+            try await device.requestCloseSession(options: nil)
+        } catch {
+            Log.info("close session returned \(error)")
+        }
         isOpen = false
         handshakeDone = false
         priorityModeIsPC = false
