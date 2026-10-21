@@ -18,10 +18,8 @@ usage:
   ZVZoom [-v] calib [ms ...]  measure positions moved per pulse length, tele then wide
   ZVZoom [-v] op <tele|wide|stop> [ms]
                               press a zoom direction for ms milliseconds (default 150) then stop
-  ZVZoom [-v] abs <value>     EXPERIMENTAL: write property 0xD214 directly
-  ZVZoom [-v] prio <0|1>       set Sony PriorityMode (experiment)
-  ZVZoom [-v] eject           close the session and ask macOS to eject the device (experiment)
-  ZVZoom [-v] usbreset        re-enumerate the camera on the USB bus (no session; experiment)
+  ZVZoom usbreset             re-enumerate the camera on the USB bus without opening a session
+                              (brings HDMI back if the camera was left in remote mode)
   ZVZoom [-v] raw <opcode> [p1 p2 ...]
                               send a data-in PTP operation (hex) and hex-dump the reply
   ZVZoom [-v] watch           print zoom state every second until Ctrl-C
@@ -197,16 +195,6 @@ func runCLI(_ args: [String]) async -> Int32 {
             }
             print("after:  \(after)")
 
-        case "abs":
-            guard args.count >= 2, let v = Int64(args[1]) else { print(usage); return 2 }
-            let before = try await cam.zoomState()
-            print("before: \(before)")
-            let type = cam.props[SonyProp.zoomAbsolute]?.type ?? .uint32
-            try await cam.setValue(SonyProp.zoomAbsolute, v, type: type)
-            try await Task.sleep(nanoseconds: 1_500_000_000)
-            let after = try await cam.zoomState()
-            print("after:  \(after)")
-
         case "raw":
             guard args.count >= 2, let op = UInt16(args[1].replacingOccurrences(of: "0x", with: ""), radix: 16) else {
                 print(usage); return 2
@@ -215,20 +203,6 @@ func runCLI(_ args: [String]) async -> Int32 {
             let (resp, data) = try await cam.send(op, params)
             print("response: \(resp.describeCode) params \(resp.params)")
             print("data (\(data.count) bytes): \(data.hexString)")
-
-        case "prio":
-            // Set Sony PriorityMode (1 = PC, 0 = camera) and leave it that way.
-            guard args.count >= 2, let v = Int(args[1]) else { print(usage); return 2 }
-            try await cam.setPriorityMode(pc: v != 0)
-            print("PriorityMode set to \(v)")
-
-        case "eject":
-            // Ask ImageCaptureCore to eject/disconnect the device after closing our session.
-            await cam.close()
-            print("requesting eject/disconnect")
-            cam.device.requestEjectOrDisconnect()
-            try await Task.sleep(nanoseconds: 3_000_000_000)
-            print("done (watch the log for device removed/added)")
 
         case "watch":
             while true {

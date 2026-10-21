@@ -6,7 +6,8 @@ Apple's ImageCaptureCore framework. Because ImageCaptureCore is the front end fo
 `ptpcamerad`, the app goes through the daemon instead of fighting it for the USB
 interface. No SIP changes, no kill loops, no libgphoto2.
 
-Tested on a ZV-1 running Sony PC Remote protocol 3.00 (current firmware) on macOS 26.
+Tested on a ZV-1 running Sony PC Remote protocol 3.00 (current firmware) on macOS 26,
+with the camera's HDMI output feeding a capture device at the same time.
 
 ## Camera setup
 
@@ -32,6 +33,9 @@ To run it at login, build a bundle and add it as a Login Item:
 open ZVZoom.app
 ```
 
+The menubar glyph is a filled camera while the ZV-1 is connected, an outline when it is
+not, and the lens breathes while a session is doing something.
+
 Menu items:
 
 - **Save Current Zoom** reads the zoom position and stores it.
@@ -53,7 +57,12 @@ ZVZoom [-v] calib [ms ...]  measure positions moved and report lag per pulse len
 ZVZoom [-v] op <tele|wide|stop> [ms]
 ZVZoom [-v] raw <opcode> [p1 p2 ...]
 ZVZoom [-v] watch
+ZVZoom usbreset             re-enumerate the camera on the USB bus (no session)
 ```
+
+Every command that opens a session also bounces the USB connection afterwards (see
+"HDMI" below). `run-diag.command` quits the menubar app first, since two PC Remote
+clients on one camera is asking for trouble.
 
 `run-diag.command` is a double-clickable wrapper: it builds, then runs each line of
 `diag-args.txt` as a ZVZoom invocation and saves the output to `diag-dump.txt`.
@@ -88,6 +97,22 @@ command block is the standard USB PTP container in little-endian; `ptpcamerad` f
 the transaction id. The two buffers it returns are not in a documented order, so the
 response container is identified by its header.
 
+## HDMI output and the USB bounce
+
+The ZV-1 switches its HDMI output off the moment a PC Remote session runs Sony's
+`SDIO_Connect` handshake, and it does not switch it back on when the PTP session closes.
+Nothing else tried brings it back either: `SDIO_Connect` phases 0 and 4 are refused,
+toggling `PriorityMode` changes nothing, and an ImageCaptureCore eject is a no-op. Only a
+USB disconnect does, and a software re-enumeration (`USBDeviceReEnumerate` through IOKit,
+`USBReset.swift`) counts as one: the camera drops off the bus for about 400 ms, comes back
+in PC Remote mode with the lens where it was, and HDMI output resumes.
+
+So every session ends with a bounce, and the app treats the resulting remove/add pair as
+its own (no new restore). From the HDMI side a restore after power-on looks like: feed
+comes up, goes black for the few seconds of the restore, comes back. Between operations
+the app holds no session at all. `bounceUSBAfterSession` in UserDefaults turns this off
+if you ever need to.
+
 ## What the ZV-1 actually does (measured)
 
 - The zoom report updates about 0.9 to 1.1 s after a `ZoomOperation` command, and keeps
@@ -100,8 +125,11 @@ response container is identified by its header.
 - `0xD214` (which libgphoto2 maps to an absolute zoom) reads 0xFFFFFFFF and is read-only
   on this firmware. There is no absolute zoom command on the ZV-1.
 - If a PC Remote session is left half-open (a crashed client), the next
-  `SDIO_Connect(1)` fails with Sony response 0xA101 (AuthenticationFailed). Power-cycle
-  the camera or replug USB.
+  `SDIO_Connect(1)` fails with Sony response 0xA101 (AuthenticationFailed). `ZVZoom
+  usbreset`, a power cycle, or a replug clears it. 0xA101 is also what the camera answers
+  to an `SDIO_Connect` phase it does not know.
+- `requestCloseSession(options:)` (the async variant) never completes through ptpcamerad
+  for this camera; the plain `requestCloseSession()` does, in about 10 ms.
 
 The restore loop (`SonyCamera.moveZoom`) sizes each pulse from that model, waits for the
 report to settle, and repeats until within tolerance (default 3 positions, about 0.03x).
@@ -112,6 +140,7 @@ Tunables, stored in UserDefaults (`defaults write ZVZoom <key> ...` for the bare
 
 ```
 tolerance     -int 3       accepted error in bar positions
+bounceUSBAfterSession -bool true   re-enumerate USB after each session (restores HDMI)
 msPerUnit     -float 7.5   initial travel estimate, refined during each restore
 nudgeMs       -int 80      length of a manual nudge pulse
 connectDelay  -float 3     seconds to wait after the camera appears
@@ -124,7 +153,11 @@ zoomWarmup    -float 2     seconds to wait after power-on before the first resto
 the Mac is not seeing it as a PTP device. Confirm USB Connection is PC Remote and the
 camera is on. The product id in the log should be `0c44`.
 
-**AuthenticationFailed on connect.** Power the camera off and on, or unplug and replug.
+**AuthenticationFailed on connect.** Run `ZVZoom usbreset`, or power the camera off and on.
+
+**HDMI feed is black.** The camera is in remote mode. `ZVZoom usbreset` brings it back
+without a power cycle. The app does this itself after every session; if it keeps
+happening, check `~/Library/Logs/ZVZoom.log` for "USB re-enumeration failed".
 
 **Zoom lands a few positions off.** Tolerance 3 is about 0.03x. Lower it to 1 if you
 want, at the cost of an extra pulse or two per restore.
@@ -142,6 +175,9 @@ position was saved.
   handshake, property reads, zoom control, settle logic, restore loop.
 - `Sources/ZVZoom/ZoomController.swift` – settings, save/restore, auto-restore on connect.
 - `Sources/ZVZoom/App.swift` – SwiftUI `MenuBarExtra` UI.
+- `Sources/ZVZoom/MenuIcon.swift` – code-drawn menubar glyphs: filled (connected), outline
+  (no camera), and the breathing-lens frames shown while a session is working.
+- `Sources/ZVZoom/USBReset.swift` – IOKit USB re-enumeration.
 - `Sources/ZVZoom/main.swift` – entry point and the CLI diagnostics.
 - `make-app.sh` – wraps the release binary in a `.app` for Login Items.
 - `run-diag.command` – double-clickable diagnostic runner.
